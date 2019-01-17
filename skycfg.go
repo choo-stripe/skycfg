@@ -27,6 +27,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"go.starlark.net/starlark"
@@ -313,6 +314,99 @@ func (c *Config) Main(ctx context.Context, opts ...ExecOption) ([]proto.Message,
 		msgs = append(msgs, msg)
 	}
 	return msgs, nil
+}
+
+// A TestResult is the result of a test run
+type TestResult int
+
+// Test result constants
+const (
+	PASS TestResult = 0
+	FAIL TestResult = 1
+)
+
+// A Test is a test case, which is a skycfg function whose name starts with `test_`.
+type Test struct {
+	name     string
+	callable starlark.Callable
+	result   TestResult
+	duration time.Duration
+	complete bool
+	err      error
+}
+
+// Run actually executes a test. It returns an error if the test does not complete successfully.
+func (t *Test) Run(ctx context.Context) error {
+	thread := &starlark.Thread{
+		Print: skyPrint,
+	}
+	thread.SetLocal("context", ctx)
+	funcCtx := &impl.Module{
+		Name: "skycfg_ctx",
+		Attrs: starlark.StringDict(map[string]starlark.Value{
+			"vars": &starlark.Dict{},
+		}),
+	}
+	args := starlark.Tuple([]starlark.Value{funcCtx})
+
+	startTime := time.Now()
+	_, err := starlark.Call(thread, t.callable, args, nil)
+	t.duration = time.Since(startTime)
+	t.err = err
+	if err != nil {
+		t.result = FAIL
+	} else {
+		t.result = PASS
+	}
+	t.complete = true
+
+	return t.err
+}
+
+// Result returns the result of the test run
+// This should only be called after the test is complete
+func (t *Test) Result() TestResult {
+	if !t.complete {
+		panic("can't get the result of a test that has not run")
+	}
+	return t.result
+}
+
+// Duration returns the duration of the test run
+// This should only be called after the test is complete
+func (t *Test) Duration() time.Duration {
+	if !t.complete {
+		panic("can't get the duration of a test that has not run")
+	}
+	return t.duration
+}
+
+// Error returns the error that the test execution returned, or nil if there was none
+// This should only be called after the test is complete
+func (t *Test) Error() error {
+	if !t.complete {
+		panic("can't get the error of a test that has not run")
+	}
+	return t.err
+}
+
+// Tests returns all tests defined in the config
+func (c *Config) Tests() []*Test {
+	tests := []*Test{}
+
+	for name, val := range c.locals {
+		if !strings.HasPrefix(name, "test_") || val.Type() != "function" {
+			continue
+		}
+
+		tests = append(tests, &Test{
+			name:     name,
+			callable: val.(starlark.Callable),
+			complete: false,
+		})
+	}
+
+	return tests
 }
 
 func skyPrint(t *starlark.Thread, msg string) {
