@@ -28,8 +28,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang/protobuf/proto"
+	junitformatter "github.com/jstemmer/go-junit-report/formatter"
+	junitparser "github.com/jstemmer/go-junit-report/parser"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 	"go.starlark.net/starlarktest"
@@ -332,10 +335,12 @@ func (c *Config) Main(ctx context.Context, opts ...ExecOption) ([]proto.Message,
 }
 
 // RunTests executes all functions with names of the form "test_...". Tests are expected to
-// load "assert.star" and use assertions. The return values of the test invocations are discarded.
-// It returns the failure messages if there were any failures, and an error if any of
-// the tests failed or did not execute properly.
-func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption) ([]string, error) {
+// load "assert.star" and use assertions. If a test does not run successfully, t.Error will
+// be called with details. The return values of the test invocations are discarded.
+// It returns a report in junit xml format.
+func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption) string {
+	packageStart := time.Now()
+
 	parsedOpts := &execOptions{
 		vars: &starlark.Dict{},
 	}
@@ -343,8 +348,11 @@ func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption)
 		opt.applyExec(parsedOpts)
 	}
 
-	msgs := []string{}
-	success := true
+	junitPackage := junitparser.Package{
+		Name:  c.Filename(),
+		Tests: []*junitparser.Test{},
+	}
+
 	for name, val := range c.locals {
 		if !strings.HasPrefix(name, "test_") || val.Type() != "function" {
 			continue
@@ -364,18 +372,29 @@ func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption)
 			}),
 		}
 		args := starlark.Tuple([]starlark.Value{funcCtx})
+
+		testStart := time.Now()
+
+		result := junitparser.PASS
 		_, err := starlark.Call(thread, callable, args, nil)
 		if err != nil {
-			msgs = append(msgs, fmt.Sprintf("Test did not exit cleanly (%s): %s", name, err))
-			success = false
+			result = junitparser.FAIL
 		}
+
+		junitPackage.Tests = append(junitPackage.Tests, &junitparser.Test{
+			Name:     name,
+			Duration: time.Since(testStart),
+			Result:   result,
+			// TODO: consider keeping output in memory and including it in the junit report
+		})
 	}
 
-	if !success {
-		return msgs, fmt.Errorf("%d tests failed to exit cleanly", len(msgs))
-	}
+	junitPackage.Duration = time.Since(packageStart)
+	junitReport := &junitparser.Report{Packages: []junitparser.Package{junitPackage}}
+	strBuilder := &strings.Builder{}
+	junitformatter.JUnitReportXML(junitReport, false, "", strBuilder)
 
-	return nil, nil
+	return strBuilder.String()
 }
 
 func skyPrint(t *starlark.Thread, msg string) {
