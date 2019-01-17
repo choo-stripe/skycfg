@@ -27,10 +27,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/golang/protobuf/proto"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
+	"go.starlark.net/starlarktest"
 
 	impl "github.com/stripe/skycfg/internal/go/skycfg"
 )
@@ -316,10 +318,10 @@ func (c *Config) Main(ctx context.Context, opts ...ExecOption) ([]proto.Message,
 }
 
 // RunTests executes all functions with names of the form "test_...". Tests are expected to
-// fail using fail("msg"). The return values of the test invocations are discarded.
+// load "assert.star" and use assertions. The return values of the test invocations are discarded.
 // It returns the failure messages if there were any failures, and an error if any of
 // the tests failed or did not execute properly.
-func (c *Config) RunTests(ctx context.Context, opts ...ExecOption) ([]string, error) {
+func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption) ([]string, error) {
 	parsedOpts := &execOptions{
 		vars: &starlark.Dict{},
 	}
@@ -336,8 +338,11 @@ func (c *Config) RunTests(ctx context.Context, opts ...ExecOption) ([]string, er
 
 		callable := val.(starlark.Callable)
 		thread := &starlark.Thread{
+			Load:  load,
 			Print: skyPrint,
 		}
+		starlarktest.SetReporter(thread, t)
+
 		thread.SetLocal("context", ctx)
 		funcCtx := &impl.Module{
 			Name: "skycfg_ctx",
@@ -372,4 +377,13 @@ func skyFail(t *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwar
 	var buf bytes.Buffer
 	t.Caller().WriteBacktrace(&buf)
 	return nil, fmt.Errorf("[%s] %s\n%s", t.Caller().Position(), msg, buf.String())
+}
+
+func load(thread *starlark.Thread, module string) (starlark.StringDict, error) {
+	if module == "assert.star" {
+		return starlarktest.LoadAssertModule()
+	}
+
+	filename := filepath.Join(filepath.Dir(thread.Caller().Position().Filename()), module)
+	return starlark.ExecFile(thread, filename, nil, nil)
 }
