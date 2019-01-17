@@ -337,8 +337,9 @@ func (c *Config) Main(ctx context.Context, opts ...ExecOption) ([]proto.Message,
 // RunTests executes all functions with names of the form "test_...". Tests are expected to
 // load "assert.star" and use assertions. If a test does not run successfully, t.Error will
 // be called with details. The return values of the test invocations are discarded.
-// It returns a report in junit xml format.
-func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption) string {
+// It returns a report in junit xml format, or an error if there was an error executing the
+// tests. NOTE: the error return value will be nil even if tests failed but they ran.
+func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption) (string, error) {
 	packageStart := time.Now()
 
 	parsedOpts := &execOptions{
@@ -392,9 +393,13 @@ func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption)
 	junitPackage.Duration = time.Since(packageStart)
 	junitReport := &junitparser.Report{Packages: []junitparser.Package{junitPackage}}
 	strBuilder := &strings.Builder{}
-	junitformatter.JUnitReportXML(junitReport, false, "", strBuilder)
+	err := junitformatter.JUnitReportXML(junitReport, false, "", strBuilder)
+	if err != nil {
+		t.Error(err)
+		return "", err
+	}
 
-	return strBuilder.String()
+	return strBuilder.String(), nil
 }
 
 func skyPrint(t *starlark.Thread, msg string) {
