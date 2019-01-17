@@ -129,6 +129,20 @@ func WithGlobals(globals starlark.StringDict) LoadOption {
 	})
 }
 
+// WithAssert adds assert functionality from assert.star
+// See https://github.com/google/starlark-go/blob/master/starlarktest/assert.star
+func WithAssert() LoadOption {
+	globals, err := starlarktest.LoadAssertModule()
+	if err != nil {
+		panic(fmt.Sprintf("WithAssert: unable to load assert module: %s", err))
+	}
+	return fnLoadOption(func(opts *loadOptions) {
+		for key, value := range globals {
+			opts.globals[key] = value
+		}
+	})
+}
+
 // WithFileReader changes the implementation of load() when loading a
 // Skycfg config.
 func WithFileReader(r FileReader) LoadOption {
@@ -338,7 +352,6 @@ func (c *Config) RunTests(ctx context.Context, t *testing.T, opts ...ExecOption)
 
 		callable := val.(starlark.Callable)
 		thread := &starlark.Thread{
-			Load:  load,
 			Print: skyPrint,
 		}
 		starlarktest.SetReporter(thread, t)
@@ -377,13 +390,4 @@ func skyFail(t *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwar
 	var buf bytes.Buffer
 	t.Caller().WriteBacktrace(&buf)
 	return nil, fmt.Errorf("[%s] %s\n%s", t.Caller().Position(), msg, buf.String())
-}
-
-func load(thread *starlark.Thread, module string) (starlark.StringDict, error) {
-	if module == "assert.star" {
-		return starlarktest.LoadAssertModule()
-	}
-
-	filename := filepath.Join(filepath.Dir(thread.Caller().Position().Filename()), module)
-	return starlark.ExecFile(thread, filename, nil, nil)
 }
