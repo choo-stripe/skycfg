@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -123,6 +124,27 @@ type unstableProtoRegistry interface {
 func WithGlobals(globals starlark.StringDict) LoadOption {
 	return fnLoadOption(func(opts *loadOptions) {
 		for key, value := range globals {
+			opts.globals[key] = value
+		}
+	})
+}
+
+// WithTestHelpers adds additional global symbols to the
+// Starlark environment to help with testing (e.g. assert)
+func WithTestHelpers() LoadOption {
+	filename := "testing.star"
+	thread := new(starlark.Thread)
+	predeclared := starlark.StringDict{
+		"catch":   starlark.NewBuiltin("catch", catch),
+		"matches": starlark.NewBuiltin("matches", matches),
+	}
+	helpers, err := starlark.ExecFile(thread, filename, nil, predeclared)
+	if err != nil {
+		panic("unable to load testing.star file")
+	}
+
+	return fnLoadOption(func(opts *loadOptions) {
+		for key, value := range helpers {
 			opts.globals[key] = value
 		}
 	})
@@ -407,6 +429,32 @@ func (c *Config) Tests() []*Test {
 	}
 
 	return tests
+}
+
+// catch(f) evaluates f() and returns its evaluation error message
+// if it failed or None if it succeeded.
+func catch(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var fn starlark.Callable
+	if err := starlark.UnpackArgs("catch", args, kwargs, "fn", &fn); err != nil {
+		return nil, err
+	}
+	if _, err := starlark.Call(thread, fn, nil, nil); err != nil {
+		return starlark.String(err.Error()), nil
+	}
+	return starlark.None, nil
+}
+
+// matches(pattern, str) reports whether string str matches the regular expression pattern.
+func matches(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var pattern, str string
+	if err := starlark.UnpackArgs("matches", args, kwargs, "pattern", &pattern, "str", &str); err != nil {
+		return nil, err
+	}
+	ok, err := regexp.MatchString(pattern, str)
+	if err != nil {
+		return nil, fmt.Errorf("matches: %s", err)
+	}
+	return starlark.Bool(ok), nil
 }
 
 func skyPrint(t *starlark.Thread, msg string) {
