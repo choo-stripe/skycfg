@@ -349,13 +349,14 @@ func (t *Test) Run(ctx context.Context) (*TestResult, error) {
 		Print: skyPrint,
 	}
 	thread.SetLocal("context", ctx)
-	funcCtx := &impl.Module{
-		Name: "skycfg_ctx",
+	testCtx := &impl.Module{
+		Name: "skycfg_test_ctx",
 		Attrs: starlark.StringDict(map[string]starlark.Value{
-			"vars": &starlark.Dict{},
+			"vars":   &starlark.Dict{},
+			"assert": starlark.NewBuiltin("assert", skyAssert),
 		}),
 	}
-	args := starlark.Tuple([]starlark.Value{funcCtx})
+	args := starlark.Tuple([]starlark.Value{testCtx})
 
 	result := TestResult{
 		Name: t.name,
@@ -365,11 +366,14 @@ func (t *Test) Run(ctx context.Context) (*TestResult, error) {
 	_, err := starlark.Call(thread, t.callable, args, nil)
 	result.Duration = time.Since(startTime)
 	if err != nil {
-		return nil, err
-	}
+		// if its not an assertion error, there was something wrong with the execution itself
+		if _, ok := err.(AssertionError); !ok {
+			return nil, err
+		}
 
-	// TODO figure out how to pass context in and differentiate between failure/error
-	result.Failure = nil
+		// some assertion failed
+		result.Failure = err
+	}
 
 	return &result, nil
 }
@@ -391,4 +395,32 @@ func skyFail(t *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwar
 	var buf bytes.Buffer
 	t.Caller().WriteBacktrace(&buf)
 	return nil, fmt.Errorf("[%s] %s\n%s", t.Caller().Position(), msg, buf.String())
+}
+
+// AssertionError represents a failed assertion
+type AssertionError struct {
+	position  string
+	backtrace string
+}
+
+func (err AssertionError) Error() string {
+	return fmt.Sprintf("[%s] assertion failed\n%s", err.position, err.backtrace)
+}
+
+func skyAssert(t *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var val bool
+	if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 1, &val); err != nil {
+		return nil, err
+	}
+
+	if !val {
+		var buf bytes.Buffer
+		t.Caller().WriteBacktrace(&buf)
+		return nil, AssertionError{
+			position:  t.Caller().Position().String(),
+			backtrace: buf.String(),
+		}
+	}
+
+	return starlark.None, nil
 }
