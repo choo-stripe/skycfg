@@ -97,6 +97,7 @@ type Config struct {
 	filename string
 	globals  starlark.StringDict
 	locals   starlark.StringDict
+	tests    []*Test
 }
 
 // A LoadOption adjusts details of how Skycfg configs are loaded.
@@ -169,7 +170,7 @@ func Load(ctx context.Context, filename string, opts ...LoadOption) (*Config, er
 		opt.applyLoad(parsedOpts)
 	}
 	protoModule.Registry = parsedOpts.protoRegistry
-	configLocals, err := loadImpl(ctx, parsedOpts, filename)
+	configLocals, tests, err := loadImpl(ctx, parsedOpts, filename)
 	if err != nil {
 		return nil, err
 	}
@@ -177,10 +178,11 @@ func Load(ctx context.Context, filename string, opts ...LoadOption) (*Config, er
 		filename: filename,
 		globals:  parsedOpts.globals,
 		locals:   configLocals,
+		tests:    tests,
 	}, nil
 }
 
-func loadImpl(ctx context.Context, opts *loadOptions, filename string) (starlark.StringDict, error) {
+func loadImpl(ctx context.Context, opts *loadOptions, filename string) (starlark.StringDict, []*Test, error) {
 	reader := opts.fileReader
 
 	type cacheEntry struct {
@@ -188,6 +190,7 @@ func loadImpl(ctx context.Context, opts *loadOptions, filename string) (starlark
 		err     error
 	}
 	cache := make(map[string]*cacheEntry)
+	tests := []*Test{}
 
 	var load func(thread *starlark.Thread, moduleName string) (starlark.StringDict, error)
 	load = func(thread *starlark.Thread, moduleName string) (starlark.StringDict, error) {
@@ -216,12 +219,22 @@ func loadImpl(ctx context.Context, opts *loadOptions, filename string) (starlark
 		cache[modulePath] = nil
 		globals, err := starlark.ExecFile(thread, modulePath, moduleSource, opts.globals)
 		cache[modulePath] = &cacheEntry{globals, err}
+
+		for name, val := range globals {
+			if strings.HasPrefix(name, "test_") && val.Type() == "function" {
+				tests = append(tests, &Test{
+					name:     name,
+					callable: val.(starlark.Callable),
+				})
+			}
+		}
 		return globals, err
 	}
-	return load(&starlark.Thread{
+	locals, err := load(&starlark.Thread{
 		Print: skyPrint,
 		Load:  load,
 	}, filename)
+	return locals, tests, err
 }
 
 // Filename returns the original filename passed to Load().
@@ -317,26 +330,21 @@ func (c *Config) Main(ctx context.Context, opts ...ExecOption) ([]proto.Message,
 }
 
 // A TestResult is the result of a test run
-type TestResult int
-
-// Test result constants
-const (
-	PASS TestResult = 0
-	FAIL TestResult = 1
-)
+type TestResult struct {
+	Name     string
+	Failure  error
+	Duration time.Duration
+}
 
 // A Test is a test case, which is a skycfg function whose name starts with `test_`.
 type Test struct {
 	name     string
 	callable starlark.Callable
-	result   TestResult
-	duration time.Duration
-	complete bool
-	err      error
 }
 
-// Run actually executes a test. It returns an error if the test does not complete successfully.
-func (t *Test) Run(ctx context.Context) error {
+// Run actually executes a test. It returns a TestResult if the test completes (even if it fails)
+// The error return value will only be non-nil if the test execution itself errors.
+func (t *Test) Run(ctx context.Context) (*TestResult, error) {
 	thread := &starlark.Thread{
 		Print: skyPrint,
 	}
@@ -349,64 +357,26 @@ func (t *Test) Run(ctx context.Context) error {
 	}
 	args := starlark.Tuple([]starlark.Value{funcCtx})
 
+	result := TestResult{
+		Name: t.name,
+	}
+
 	startTime := time.Now()
 	_, err := starlark.Call(thread, t.callable, args, nil)
-	t.duration = time.Since(startTime)
-	t.err = err
+	result.Duration = time.Since(startTime)
 	if err != nil {
-		t.result = FAIL
-	} else {
-		t.result = PASS
+		return nil, err
 	}
-	t.complete = true
 
-	return t.err
-}
+	// TODO figure out how to pass context in and differentiate between failure/error
+	result.Failure = nil
 
-// Result returns the result of the test run
-// This should only be called after the test is complete
-func (t *Test) Result() TestResult {
-	if !t.complete {
-		panic("can't get the result of a test that has not run")
-	}
-	return t.result
-}
-
-// Duration returns the duration of the test run
-// This should only be called after the test is complete
-func (t *Test) Duration() time.Duration {
-	if !t.complete {
-		panic("can't get the duration of a test that has not run")
-	}
-	return t.duration
-}
-
-// Error returns the error that the test execution returned, or nil if there was none
-// This should only be called after the test is complete
-func (t *Test) Error() error {
-	if !t.complete {
-		panic("can't get the error of a test that has not run")
-	}
-	return t.err
+	return &result, nil
 }
 
 // Tests returns all tests defined in the config
 func (c *Config) Tests() []*Test {
-	tests := []*Test{}
-
-	for name, val := range c.locals {
-		if !strings.HasPrefix(name, "test_") || val.Type() != "function" {
-			continue
-		}
-
-		tests = append(tests, &Test{
-			name:     name,
-			callable: val.(starlark.Callable),
-			complete: false,
-		})
-	}
-
-	return tests
+	return c.tests
 }
 
 func skyPrint(t *starlark.Thread, msg string) {
