@@ -354,13 +354,13 @@ func (t *Test) Run(ctx context.Context) (*TestResult, error) {
 	thread.SetLocal("context", ctx)
 
 	// we can keep track of assertion failures in the failureCtx
-	failureCtx := &testContext{}
+	failureCtx, assertModule := impl.AssertModule()
 
 	testCtx := &impl.Module{
 		Name: "skycfg_test_ctx",
 		Attrs: starlark.StringDict(map[string]starlark.Value{
 			"vars":   &starlark.Dict{},
-			"assert": starlark.NewBuiltin("assert", failureCtx.assertImpl),
+			"assert": assertModule,
 		}),
 	}
 	args := starlark.Tuple([]starlark.Value{testCtx})
@@ -374,12 +374,12 @@ func (t *Test) Run(ctx context.Context) (*TestResult, error) {
 	result.Duration = time.Since(startTime)
 	if err != nil {
 		// if there is no assertion error, there was something wrong with the execution itself
-		if failureCtx.failure == nil {
+		if failureCtx.Failure == nil {
 			return nil, err
 		}
 
 		// some assertion failed
-		result.Failure = failureCtx.failure
+		result.Failure = failureCtx.Failure
 	}
 
 	return &result, nil
@@ -402,38 +402,4 @@ func skyFail(t *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwar
 	var buf bytes.Buffer
 	t.Caller().WriteBacktrace(&buf)
 	return nil, fmt.Errorf("[%s] %s\n%s", t.Caller().Position(), msg, buf.String())
-}
-
-// AssertionError represents a failed assertion
-type AssertionError struct {
-	position  string
-	backtrace string
-}
-
-func (err AssertionError) Error() string {
-	return fmt.Sprintf("[%s] assertion failed\n%s", err.position, err.backtrace)
-}
-
-type testContext struct {
-	failure error
-}
-
-func (t *testContext) assertImpl(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var val bool
-	if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 1, &val); err != nil {
-		return nil, err
-	}
-
-	if !val {
-		var buf bytes.Buffer
-		thread.Caller().WriteBacktrace(&buf)
-		err := AssertionError{
-			position:  thread.Caller().Position().String(),
-			backtrace: buf.String(),
-		}
-		t.failure = err
-		return nil, err
-	}
-
-	return starlark.None, nil
 }
